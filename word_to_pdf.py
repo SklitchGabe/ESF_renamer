@@ -14,6 +14,7 @@ import argparse
 import re
 import PyPDF2
 from langdetect import detect, LangDetectException
+import pandas as pd
 
 # Set up logging
 logging.basicConfig(
@@ -213,7 +214,7 @@ def get_unique_filename(base_path):
             return new_path
         counter += 1
 
-def process_file(file_path, output_dir, input_dir, rename_with_pid=True):
+def process_file(file_path, output_dir, input_dir, rename_with_pid=True, country_mapping=None):
     """Process a single file conversion with error handling and optional PID renaming"""
     try:
         input_path = os.path.abspath(file_path)
@@ -259,18 +260,31 @@ def process_file(file_path, output_dir, input_dir, rename_with_pid=True):
                     logging.info(f"Found project ID in filename: {project_id}")
             
             if project_id:
-                # Detect language (only if we successfully found a project ID)
+                # Detect language
                 language_suffix = detect_language(pdf_path)
                 
-                # Create new filename with project ID and language suffix
-                pid_filename = f"{project_id}_{language_suffix}.pdf"
+                # Get country if available
+                country = ""
+                if country_mapping and project_id in country_mapping:
+                    country = country_mapping[project_id]
+                    country = country.replace(" ", "_")  # Replace spaces with underscores
+                
+                # Create new filename with project ID, country (if available), and language
+                if country:
+                    pid_filename = f"{project_id}_{country}_{language_suffix}.pdf"
+                else:
+                    pid_filename = f"{project_id}_{language_suffix}.pdf"
+                
                 pid_path = os.path.join(target_dir, pid_filename)
                 
                 # Handle duplicate filenames
                 if os.path.exists(pid_path):
                     counter = 1
                     while True:
-                        temp_name = f"{project_id}_{language_suffix}_{counter:02d}.pdf"
+                        if country:
+                            temp_name = f"{project_id}_{country}_{language_suffix}_{counter:02d}.pdf"
+                        else:
+                            temp_name = f"{project_id}_{language_suffix}_{counter:02d}.pdf"
                         temp_path = os.path.join(target_dir, temp_name)
                         if not os.path.exists(temp_path):
                             pid_path = temp_path
@@ -400,8 +414,8 @@ def copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=T
     print(f"PDF copying complete. Copied: {copied}, Skipped: {skipped}")
     return copied, pid_mapping
 
-def convert_folder_to_pdf(rename_with_pid=True):
-    """Convert all Word documents in a folder to PDF and optionally rename with Project IDs"""
+def convert_folder_to_pdf(rename_with_pid=True, country_mapping=None):
+    """Convert all Word documents in a folder to PDF"""
     # Check if we're on Windows
     if platform.system() != "Windows":
         print("Error: This script requires Windows with Microsoft Word installed")
@@ -418,6 +432,21 @@ def convert_folder_to_pdf(rename_with_pid=True):
     if not os.path.isdir(input_dir):
         print(f"Error: '{input_dir}' is not a valid directory")
         return 1
+    
+    # Prompt for country spreadsheet if not provided
+    if rename_with_pid and country_mapping is None:
+        print("Do you want to use a spreadsheet to map project IDs to countries? (y/n):")
+        use_country_mapping = input().strip().lower() == 'y'
+        
+        if use_country_mapping:
+            print("Please enter the path to the spreadsheet file (Excel or CSV):")
+            spreadsheet_path = input().strip().strip('"\'')
+            
+            if os.path.exists(spreadsheet_path):
+                country_mapping = load_project_country_mapping(spreadsheet_path)
+            else:
+                print(f"Warning: Spreadsheet file not found: {spreadsheet_path}")
+                country_mapping = {}
     
     # Prompt user for the output folder path
     print("Please enter the path to the output folder for PDF files:")
@@ -488,7 +517,7 @@ def convert_folder_to_pdf(rename_with_pid=True):
             with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
                 # Submit jobs for this batch with input_dir as an additional argument
                 future_to_file = {
-                    executor.submit(process_file, file, output_dir, input_dir, rename_with_pid): file
+                    executor.submit(process_file, file, output_dir, input_dir, rename_with_pid, country_mapping): file
                     for file in batch
                 }
                 
@@ -678,6 +707,94 @@ def detect_language(pdf_path, pages_to_check=3):
     except Exception as e:
         logging.error(f"Error detecting language in {pdf_path}: {str(e)}")
         return "NON"  # Default to non-English on error
+
+def load_project_country_mapping(spreadsheet_path, pid_column=None, country_column=None):
+    """
+    Load project ID to country mapping from a spreadsheet.
+    
+    Args:
+        spreadsheet_path: Path to the spreadsheet file (Excel or CSV)
+        pid_column: Column name/index containing project IDs
+        country_column: Column name/index containing country names
+        
+    Returns:
+        Dictionary mapping project IDs to countries
+    """
+    try:
+        # Check file extension
+        file_ext = os.path.splitext(spreadsheet_path)[1].lower()
+        
+        # Load the spreadsheet based on file type
+        if file_ext in ['.xlsx', '.xls']:
+            df = pd.read_excel(spreadsheet_path)
+        elif file_ext == '.csv':
+            df = pd.read_csv(spreadsheet_path)
+        else:
+            logging.error(f"Unsupported file format: {file_ext}")
+            return {}
+        
+        # Show the column names to the user if not specified
+        if pid_column is None or country_column is None:
+            print("\nAvailable columns in the spreadsheet:")
+            for i, col in enumerate(df.columns):
+                print(f"{i}: {col}")
+            
+            if pid_column is None:
+                pid_column = input("\nEnter the number or name of the column containing Project IDs: ").strip()
+                # Try to convert to integer if it's a number
+                try:
+                    pid_column = int(pid_column)
+                    pid_column = df.columns[pid_column]
+                except ValueError:
+                    pass
+            
+            if country_column is None:
+                country_column = input("Enter the number or name of the column containing Countries: ").strip()
+                # Try to convert to integer if it's a number
+                try:
+                    country_column = int(country_column)
+                    country_column = df.columns[country_column]
+                except ValueError:
+                    pass
+        
+        # Ensure the columns exist
+        if pid_column not in df.columns:
+            logging.error(f"Project ID column '{pid_column}' not found in spreadsheet")
+            return {}
+        
+        if country_column not in df.columns:
+            logging.error(f"Country column '{country_column}' not found in spreadsheet")
+            return {}
+        
+        # Create the mapping
+        mapping = {}
+        for _, row in df.iterrows():
+            project_id = str(row[pid_column]).strip()
+            country = str(row[country_column]).strip()
+            
+            # Skip empty values
+            if not project_id or not country:
+                continue
+            
+            # Handle project IDs that may not start with 'P'
+            if project_id and not project_id.startswith('P') and project_id.isdigit():
+                project_id = f"P{project_id}"
+            
+            # Clean project ID to ensure it follows the P###### format
+            # Remove any non-alphanumeric characters
+            project_id = re.sub(r'[^P0-9]', '', project_id)
+            
+            # Make sure it matches our expected format
+            if re.match(r'P\d{6}', project_id):
+                mapping[project_id] = country
+        
+        print(f"Loaded {len(mapping)} project ID to country mappings")
+        return mapping
+    
+    except Exception as e:
+        logging.error(f"Error loading project country mapping: {str(e)}")
+        print(f"Error loading spreadsheet: {str(e)}")
+        return {}
 
 if __name__ == "__main__":
     args = parse_args()
