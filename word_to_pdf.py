@@ -16,15 +16,20 @@ import PyPDF2
 from langdetect import detect, LangDetectException
 import pandas as pd
 
-# Set up logging
+# Update the logging configuration to separate console and file handlers
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("pdf_conversion.log"),
-        logging.StreamHandler()
     ]
 )
+
+# Add a simpler console handler with less output
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.WARNING)  # Only warnings and errors to console
+console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+logging.getLogger().addHandler(console_handler)
 
 def convert_with_word(input_file, output_file=None, retries=2):
     """Convert doc/docx to PDF using Microsoft Word (Windows only)"""
@@ -260,6 +265,32 @@ def process_file(file_path, output_dir, input_dir, rename_with_pid=True, country
                     logging.info(f"Found project ID in filename: {project_id}")
             
             if project_id:
+                # First rename with just the project ID
+                base_pid_filename = f"{project_id}.pdf"
+                base_pid_path = os.path.join(target_dir, base_pid_filename)
+                
+                # Handle duplicate filenames for base project ID
+                if os.path.exists(base_pid_path):
+                    counter = 1
+                    while True:
+                        temp_name = f"{project_id}_{counter:02d}.pdf"
+                        temp_path = os.path.join(target_dir, temp_name)
+                        if not os.path.exists(temp_path):
+                            base_pid_path = temp_path
+                            base_pid_filename = temp_name
+                            break
+                        counter += 1
+                
+                # Rename to the base project ID first
+                try:
+                    os.rename(pdf_path, base_pid_path)
+                    logging.info(f"First renamed to: {base_pid_filename}")
+                    pdf_path = base_pid_path  # Update pdf_path for further processing
+                except Exception as e:
+                    logging.error(f"Error in first renaming step: {str(e)}")
+                    return (file_path, True, None, None)
+                
+                # Now add country and language information
                 # Detect language
                 language_suffix = detect_language(pdf_path)
                 
@@ -268,8 +299,9 @@ def process_file(file_path, output_dir, input_dir, rename_with_pid=True, country
                 if country_mapping and project_id in country_mapping:
                     country = country_mapping[project_id]
                     country = country.replace(" ", "_")  # Replace spaces with underscores
+                    logging.info(f"Found country '{country}' for project ID {project_id}")
                 
-                # Create new filename with project ID, country (if available), and language
+                # Create final filename with project ID, country (if available), and language
                 if country:
                     pid_filename = f"{project_id}_{country}_{language_suffix}.pdf"
                 else:
@@ -277,8 +309,8 @@ def process_file(file_path, output_dir, input_dir, rename_with_pid=True, country
                 
                 pid_path = os.path.join(target_dir, pid_filename)
                 
-                # Handle duplicate filenames
-                if os.path.exists(pid_path):
+                # Handle duplicate filenames for the final name
+                if os.path.exists(pid_path) and pid_path != pdf_path:
                     counter = 1
                     while True:
                         if country:
@@ -286,20 +318,20 @@ def process_file(file_path, output_dir, input_dir, rename_with_pid=True, country
                         else:
                             temp_name = f"{project_id}_{language_suffix}_{counter:02d}.pdf"
                         temp_path = os.path.join(target_dir, temp_name)
-                        if not os.path.exists(temp_path):
+                        if not os.path.exists(temp_path) or temp_path == pdf_path:
                             pid_path = temp_path
                             pid_filename = temp_name
                             break
                         counter += 1
                 
-                # Rename the file
+                # Perform the final rename
                 try:
                     os.rename(pdf_path, pid_path)
-                    logging.info(f"Renamed to: {pid_filename}")
+                    logging.info(f"Final renamed to: {pid_filename}")
                     return (file_path, True, None, project_id)
                 except Exception as e:
-                    logging.error(f"Error renaming: {str(e)}")
-                    return (file_path, True, None, None)
+                    logging.error(f"Error in final renaming step: {str(e)}")
+                    return (file_path, True, None, project_id)  # Still return project_id as we found it
             else:
                 logging.warning(f"No project ID found in PDF or filename: {pdf_path}")
                 return (file_path, True, None, None)
@@ -308,7 +340,7 @@ def process_file(file_path, output_dir, input_dir, rename_with_pid=True, country
     except Exception as e:
         return (file_path, False, str(e), None)
 
-def copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=True):
+def copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=True, country_mapping=None):
     """Copy all existing PDF files from input directory to output directory"""
     pdf_files = []
     for root, _, files in os.walk(input_dir):
@@ -336,7 +368,7 @@ def copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=T
             else:
                 target_dir = output_dir
             
-            # Get the destination path
+            # Get the destination path initially (will be modified if project ID is found)
             dest_file = os.path.join(target_dir, os.path.basename(pdf_file))
             
             try:
@@ -353,29 +385,70 @@ def copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=T
                             logging.info(f"Found project ID in filename: {project_id}")
                     
                     if project_id:
-                        # Detect language (only if we successfully found a project ID)
-                        language_suffix = detect_language(pdf_file)
+                        # First create a base project ID filename
+                        base_pid_filename = f"{project_id}.pdf"
+                        base_dest_file = os.path.join(target_dir, base_pid_filename)
                         
-                        # Create new filename with project ID and language suffix
-                        pid_filename = f"{project_id}_{language_suffix}.pdf"
-                        dest_file = os.path.join(target_dir, pid_filename)
-                        
-                        # Handle duplicate filenames
-                        if os.path.exists(dest_file):
+                        # Handle duplicate filenames for base project ID
+                        if os.path.exists(base_dest_file):
                             counter = 1
                             while True:
-                                temp_name = f"{project_id}_{language_suffix}_{counter:02d}.pdf"
+                                temp_name = f"{project_id}_{counter:02d}.pdf"
                                 temp_path = os.path.join(target_dir, temp_name)
                                 if not os.path.exists(temp_path):
-                                    dest_file = temp_path
+                                    base_dest_file = temp_path
+                                    base_pid_filename = temp_name
+                                    break
+                                counter += 1
+                        
+                        # Copy with base project ID first
+                        shutil.copy2(pdf_file, base_dest_file)
+                        logging.info(f"First copied with project ID: {pdf_file} -> {base_dest_file}")
+                        
+                        # Detect language
+                        language_suffix = detect_language(base_dest_file)
+                        
+                        # Get country if available
+                        country = ""
+                        if country_mapping and project_id in country_mapping:
+                            country = country_mapping[project_id]
+                            country = country.replace(" ", "_")  # Replace spaces with underscores
+                            logging.info(f"Found country '{country}' for project ID {project_id}")
+                        
+                        # Create final filename with project ID, country (if available), and language
+                        if country:
+                            pid_filename = f"{project_id}_{country}_{language_suffix}.pdf"
+                        else:
+                            pid_filename = f"{project_id}_{language_suffix}.pdf"
+                        
+                        final_dest_file = os.path.join(target_dir, pid_filename)
+                        
+                        # Handle duplicate filenames for final name
+                        if os.path.exists(final_dest_file) and final_dest_file != base_dest_file:
+                            counter = 1
+                            while True:
+                                if country:
+                                    temp_name = f"{project_id}_{country}_{language_suffix}_{counter:02d}.pdf"
+                                else:
+                                    temp_name = f"{project_id}_{language_suffix}_{counter:02d}.pdf"
+                                temp_path = os.path.join(target_dir, temp_name)
+                                if not os.path.exists(temp_path) or temp_path == base_dest_file:
+                                    final_dest_file = temp_path
                                     pid_filename = temp_name
                                     break
                                 counter += 1
                         
-                        logging.info(f"Copying with project ID: {pdf_file} -> {dest_file}")
-                        shutil.copy2(pdf_file, dest_file)
-                        copied += 1
-                        pid_mapping[dest_file] = project_id
+                        # Rename to final filename
+                        try:
+                            os.rename(base_dest_file, final_dest_file)
+                            logging.info(f"Final filename: {final_dest_file}")
+                            copied += 1
+                            pid_mapping[final_dest_file] = project_id
+                        except Exception as e:
+                            logging.error(f"Error in final rename: {str(e)}")
+                            # Even if final rename fails, we've copied the file
+                            copied += 1
+                            pid_mapping[base_dest_file] = project_id
                     else:
                         # No project ID found, use original filename
                         logging.warning(f"No project ID found in PDF or filename: {pdf_file}")
@@ -393,8 +466,6 @@ def copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=T
                     # Standard copy without PID renaming
                     # Check if file already exists
                     if os.path.exists(dest_file):
-                        # ALWAYS create a unique filename with numeric suffix
-                        # regardless of the overwrite parameter
                         unique_dest = get_unique_filename(dest_file)
                         shutil.copy2(pdf_file, unique_dest)
                         logging.info(f"Created unique filename: {unique_dest}")
@@ -413,6 +484,29 @@ def copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=T
     
     print(f"PDF copying complete. Copied: {copied}, Skipped: {skipped}")
     return copied, pid_mapping
+
+def process_batch(batch, output_dir, input_dir, rename_with_pid=True, country_mapping=None):
+    # Make tqdm output more compact with less messages
+    with tqdm(total=len(batch), unit="file", desc="Converting") as pbar:
+        futures = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=get_optimal_workers()) as executor:
+            future_to_file = {
+                executor.submit(process_file, file, output_dir, input_dir, rename_with_pid, country_mapping): file
+                for file in batch
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_file):
+                file = future_to_file[future]
+                try:
+                    _, success, error, _ = future.result()
+                    if not success:
+                        print(f"Error processing {os.path.basename(file)}: {error}")
+                except Exception as e:
+                    print(f"Exception processing {os.path.basename(file)}: {str(e)}")
+                
+                pbar.update(1)
+    
+    return len(batch)
 
 def convert_folder_to_pdf(rename_with_pid=True, country_mapping=None):
     """Convert all Word documents in a folder to PDF"""
@@ -514,25 +608,7 @@ def convert_folder_to_pdf(rename_with_pid=True, country_mapping=None):
                 pass
                     
             # Process the current batch
-            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-                # Submit jobs for this batch with input_dir as an additional argument
-                future_to_file = {
-                    executor.submit(process_file, file, output_dir, input_dir, rename_with_pid, country_mapping): file
-                    for file in batch
-                }
-                
-                # Process results
-                with tqdm(total=len(batch), unit="file") as pbar:
-                    for future in concurrent.futures.as_completed(future_to_file):
-                        file_path, success, error, project_id = future.result()
-                        if success:
-                            successful += 1
-                            if project_id:
-                                project_id_mappings[file_path] = project_id
-                        else:
-                            failed += 1
-                            print(f"Error converting {file_path}: {error}")
-                        pbar.update(1)
+            process_batch(batch, output_dir, input_dir, rename_with_pid, country_mapping)
         
         # Report results
         elapsed_time = time.time() - start_time
@@ -549,10 +625,65 @@ def convert_folder_to_pdf(rename_with_pid=True, country_mapping=None):
             print("Success rate: N/A (no files processed)")
     
     # Always set overwrite=False to ensure no files are overwritten
-    copied_pdfs, pdf_pid_mappings = copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=rename_with_pid)
+    copied_pdfs, pdf_pid_mappings = copy_existing_pdfs(
+        input_dir, 
+        output_dir, 
+        overwrite=False, 
+        rename_with_pid=rename_with_pid, 
+        country_mapping=country_mapping
+    )
     
     # Merge the project ID mappings
     project_id_mappings.update(pdf_pid_mappings)
+    
+    # After all the processing is complete, apply brute force country mapping
+    print("\nFinalizing country information...")
+    if country_mapping:
+        # Brute force apply country mapping to any files that might have been missed
+        updated_files = apply_country_mapping_to_existing_files(output_dir, country_mapping)
+        if updated_files > 0:
+            print(f"Applied country information to {updated_files} additional files")
+    
+    print(f"\nAll operations complete. Output files saved to: {output_dir}")
+    
+    # Verify the output directory contents
+    output_files = []
+    for root, _, files in os.walk(output_dir):
+        for file in files:
+            if file.lower().endswith('.pdf'):
+                output_files.append(os.path.join(root, file))
+    
+    print(f"Actual PDF files in output directory: {len(output_files)}")
+    
+    if len(output_files) < (successful + copied_pdfs):
+        print("WARNING: Some files may have been overwritten due to naming conflicts.")
+    
+    # Create a summary of project IDs found
+    if rename_with_pid:
+        project_ids = list(set(project_id_mappings.values()))
+        print(f"\nFound {len(project_ids)} unique project IDs")
+        if project_ids:
+            print("Sample of project IDs found:")
+            for pid in project_ids[:5]:  # Show first 5
+                print(f"  - {pid}")
+            if len(project_ids) > 5:
+                print(f"  ...and {len(project_ids) - 5} more")
+    
+    # Add at the beginning of convert_folder_to_pdf, after loading country_mapping:
+    if country_mapping:
+        logging.info(f"Country mapping loaded with {len(country_mapping)} entries")
+        # Log first 5 entries for debugging
+        sample_entries = list(country_mapping.items())[:5]
+        for pid, country in sample_entries:
+            logging.info(f"Country mapping sample: {pid} -> {country}")
+    
+    # After all the processing is complete, apply brute force country mapping
+    print("\nFinalizing country information...")
+    if country_mapping:
+        # Brute force apply country mapping to any files that might have been missed
+        updated_files = apply_country_mapping_to_existing_files(output_dir, country_mapping)
+        if updated_files > 0:
+            print(f"Applied country information to {updated_files} additional files")
     
     print(f"\nAll operations complete. Output files saved to: {output_dir}")
     
@@ -606,16 +737,56 @@ def is_file_locked(file_path):
     except IOError:
         return True
 
+def get_optimal_workers():
+    """
+    Determine the optimal number of worker threads for Word document conversion.
+    Returns a reasonable number based on CPU cores while avoiding overloading the system.
+    
+    Returns:
+        int: Number of worker threads to use
+    """
+    # Base calculation on CPU cores
+    cpu_count = os.cpu_count() or 4  # Default to 4 if detection fails
+    
+    # For Word document processing, using all cores can cause issues
+    # Word instances are memory-intensive, so we'll be conservative
+    
+    # Use half the cores, but at least 2 and at most 4
+    # This is a balanced approach for Word processing
+    workers = max(2, min(4, cpu_count // 2))
+    
+    # For systems with many cores, still cap at 4 Word instances
+    # to avoid overwhelming the system with Word processes
+    return workers
+
 def get_optimal_batch_size():
-    """Determine optimal batch size based on available system memory"""
-    mem = psutil.virtual_memory()
-    # Use a smaller batch size for systems with less RAM
-    if mem.total < 8 * 1024 * 1024 * 1024:  # 8 GB
-        return 5
-    elif mem.total < 16 * 1024 * 1024 * 1024:  # 16 GB
-        return 10
-    else:
-        return 15
+    """
+    Determine optimal batch size for processing Word documents based on system memory.
+    
+    Returns:
+        int: Batch size to use
+    """
+    # Default to a moderate batch size
+    default_batch_size = 20
+    
+    try:
+        # Try to detect system memory
+        import psutil
+        total_memory_gb = psutil.virtual_memory().total / (1024**3)  # Convert to GB
+        
+        # Adjust batch size based on available memory
+        # Rough estimate: each Word instance might use 200-300MB
+        if total_memory_gb < 4:
+            return 10  # Less than 4GB RAM
+        elif total_memory_gb < 8:
+            return 20  # 4-8GB RAM
+        elif total_memory_gb < 16:
+            return 50  # 8-16GB RAM
+        else:
+            return 100  # More than 16GB RAM
+    except ImportError:
+        # If psutil isn't available, use a conservative default
+        return default_batch_size
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Convert Word documents to PDF and rename with Project IDs')
@@ -711,14 +882,6 @@ def detect_language(pdf_path, pages_to_check=3):
 def load_project_country_mapping(spreadsheet_path, pid_column=None, country_column=None):
     """
     Load project ID to country mapping from a spreadsheet.
-    
-    Args:
-        spreadsheet_path: Path to the spreadsheet file (Excel or CSV)
-        pid_column: Column name/index containing project IDs
-        country_column: Column name/index containing country names
-        
-    Returns:
-        Dictionary mapping project IDs to countries
     """
     try:
         # Check file extension
@@ -755,7 +918,7 @@ def load_project_country_mapping(spreadsheet_path, pid_column=None, country_colu
                     country_column = int(country_column)
                     country_column = df.columns[country_column]
                 except ValueError:
-                    pass
+                    pass  # Keep as string if not a valid integer
         
         # Ensure the columns exist
         if pid_column not in df.columns:
@@ -766,14 +929,16 @@ def load_project_country_mapping(spreadsheet_path, pid_column=None, country_colu
             logging.error(f"Country column '{country_column}' not found in spreadsheet")
             return {}
         
-        # Create the mapping
+        # Initialize mapping dictionary
         mapping = {}
+        
+        # Create the mapping
         for _, row in df.iterrows():
             project_id = str(row[pid_column]).strip()
             country = str(row[country_column]).strip()
             
             # Skip empty values
-            if not project_id or not country:
+            if not project_id or not country or pd.isna(project_id) or pd.isna(country):
                 continue
             
             # Handle project IDs that may not start with 'P'
@@ -789,12 +954,108 @@ def load_project_country_mapping(spreadsheet_path, pid_column=None, country_colu
                 mapping[project_id] = country
         
         print(f"Loaded {len(mapping)} project ID to country mappings")
+        if mapping:
+            print("Sample mapping entries:")
+            sample = list(mapping.items())[:3]
+            for pid, country in sample:
+                print(f"  {pid} → {country}")
+        
         return mapping
     
     except Exception as e:
         logging.error(f"Error loading project country mapping: {str(e)}")
         print(f"Error loading spreadsheet: {str(e)}")
         return {}
+
+def apply_country_mapping_to_existing_files(output_dir, country_mapping):
+    """
+    Brute force apply country mapping to all PDF files in the output directory
+    that have a project ID in their filename but may be missing the country.
+    """
+    if not country_mapping:
+        print("No country mapping provided, skipping country tagging step.")
+        return 0
+    
+    print("\nPerforming final country mapping check on all files...")
+    
+    # Find all PDF files in the output directory
+    pdf_files = []
+    for root, _, files in os.walk(output_dir):
+        for file in files:
+            if file.lower().endswith('.pdf'):
+                pdf_files.append(os.path.join(root, file))
+    
+    if not pdf_files:
+        print("No PDF files found in output directory.")
+        return 0
+    
+    # Initialize counter (was missing in original code)
+    updated_count = 0
+    
+    with tqdm(total=len(pdf_files), unit="file", desc="Checking files") as pbar:
+        for pdf_file in pdf_files:
+            filename = os.path.basename(pdf_file)
+            dirname = os.path.dirname(pdf_file)
+            
+            # Extract project ID from filename using regex
+            match = re.search(r'(P\d{6})', filename)
+            if match:
+                project_id = match.group(1)
+                
+                # Check if this project ID has a country mapping
+                if project_id in country_mapping:
+                    country = country_mapping[project_id].replace(" ", "_")
+                    
+                    # Check if country is already in the filename
+                    if country not in filename:
+                        # Get all parts of the filename
+                        if "_" in filename:
+                            parts = filename.split('_')
+                        else:
+                            # Handle case where there's no underscore (just "P123456.pdf")
+                            parts = [filename[:-4]]  # Remove .pdf
+                            
+                        # Check if project ID is the first part 
+                        if parts[0] == project_id:
+                            # Create new filename with country inserted after project ID
+                            if len(parts) > 1:
+                                new_parts = [parts[0], country] + parts[1:]
+                                new_filename = "_".join(new_parts)
+                            else:
+                                new_filename = f"{project_id}_{country}.pdf"
+                            
+                            new_path = os.path.join(dirname, new_filename)
+                            
+                            # Handle duplicate filenames
+                            counter = 1
+                            while os.path.exists(new_path) and new_path != pdf_file:
+                                if len(parts) > 1 and parts[-1].endswith('.pdf'):
+                                    # If the last part is the .pdf extension with possible counter
+                                    base = parts[-1].split('.')[0]
+                                    if base.isdigit():
+                                        # Already has counter, keep it
+                                        new_parts = [parts[0], country] + parts[1:]
+                                    else:
+                                        # Add counter before .pdf
+                                        new_parts = [parts[0], country] + parts[1:-1] + [f"{counter:02d}.pdf"]
+                                else:
+                                    new_parts = [parts[0], country] + parts[1:] + [f"{counter:02d}.pdf"]
+                                
+                                new_filename = "_".join(new_parts)
+                                new_path = os.path.join(dirname, new_filename)
+                                counter += 1
+                            
+                            try:
+                                os.rename(pdf_file, new_path)
+                                logging.info(f"Added country to: {filename} -> {new_filename}")
+                                updated_count += 1
+                            except Exception as e:
+                                logging.error(f"Error renaming {pdf_file} to {new_path}: {str(e)}")
+            
+            pbar.update(1)
+    
+    print(f"Updated {updated_count} files with country information")
+    return updated_count
 
 if __name__ == "__main__":
     args = parse_args()
