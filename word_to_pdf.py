@@ -22,9 +22,15 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("pdf_conversion.log"),
-        logging.StreamHandler()
+        # Only log warnings and errors to console to reduce clutter
+        logging.StreamHandler(sys.stdout)
     ]
 )
+
+# Set the console handler to only show warnings and errors
+for handler in logging.getLogger().handlers:
+    if isinstance(handler, logging.StreamHandler) and handler.stream == sys.stdout:
+        handler.setLevel(logging.WARNING)
 
 def convert_with_word(input_file, output_file=None, retries=2):
     """Convert doc/docx to PDF using Microsoft Word (Windows only)"""
@@ -233,12 +239,12 @@ def process_file(file_path, output_dir, input_dir, rename_with_pid=True, country
         
         # Always check if output file already exists, regardless of the source
         if os.path.exists(output_path):
-            logging.warning(f"File already exists, creating unique name: {output_path}")
+            logging.debug(f"File already exists, creating unique name: {output_path}")
             output_path = get_unique_filename(output_path)
-            logging.info(f"Using unique name: {output_path}")
+            logging.debug(f"Using unique name: {output_path}")
         
         # Log the paths to help debug
-        logging.info(f"Converting: {input_path} -> {output_path}")
+        logging.debug(f"Converting: {input_path} -> {output_path}")
         
         # Ensure we're on Windows since Word is required
         if platform.system() != "Windows":
@@ -254,20 +260,23 @@ def process_file(file_path, output_dir, input_dir, rename_with_pid=True, country
             
             # If no project ID found in PDF content, check the filename
             if not project_id:
-                logging.info(f"No project ID found in PDF content, checking filename: {os.path.basename(file_path)}")
+                logging.debug(f"No project ID found in PDF content, checking filename: {os.path.basename(file_path)}")
                 project_id = extract_project_id_from_filename(os.path.basename(file_path))
                 if project_id:
-                    logging.info(f"Found project ID in filename: {project_id}")
+                    logging.debug(f"Found project ID in filename: {project_id}")
             
             if project_id:
                 # Detect language
                 language_suffix = detect_language(pdf_path)
                 
-                # Get country if available
+                # Get country if available - make this more rigorous
                 country = ""
                 if country_mapping and project_id in country_mapping:
                     country = country_mapping[project_id]
                     country = country.replace(" ", "_")  # Replace spaces with underscores
+                    logging.info(f"Found country '{country}' for project ID: {project_id}")
+                else:
+                    logging.debug(f"No country mapping found for project ID: {project_id}")
                 
                 # Create new filename with project ID, country (if available), and language
                 if country:
@@ -308,7 +317,7 @@ def process_file(file_path, output_dir, input_dir, rename_with_pid=True, country
     except Exception as e:
         return (file_path, False, str(e), None)
 
-def copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=True):
+def copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=True, country_mapping=None):
     """Copy all existing PDF files from input directory to output directory"""
     pdf_files = []
     for root, _, files in os.walk(input_dir):
@@ -326,7 +335,7 @@ def copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=T
     skipped = 0
     pid_mapping = {}  # To store file -> project ID mapping
     
-    with tqdm(total=len(pdf_files), unit="file") as pbar:
+    with tqdm(total=len(pdf_files), unit="file", desc="Copying PDFs", ncols=100, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as pbar:
         for pdf_file in pdf_files:
             # Create the relative path for maintaining folder structure
             rel_path = os.path.relpath(os.path.dirname(pdf_file), start=input_dir)
@@ -347,24 +356,40 @@ def copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=T
                     
                     # If no project ID found in PDF content, check the filename
                     if not project_id:
-                        logging.info(f"No project ID found in PDF content, checking filename: {os.path.basename(pdf_file)}")
+                        logging.debug(f"No project ID found in PDF content, checking filename: {os.path.basename(pdf_file)}")
                         project_id = extract_project_id_from_filename(os.path.basename(pdf_file))
                         if project_id:
-                            logging.info(f"Found project ID in filename: {project_id}")
+                            logging.debug(f"Found project ID in filename: {project_id}")
                     
                     if project_id:
-                        # Detect language (only if we successfully found a project ID)
+                        # Detect language
                         language_suffix = detect_language(pdf_file)
                         
-                        # Create new filename with project ID and language suffix
-                        pid_filename = f"{project_id}_{language_suffix}.pdf"
+                        # Get country if available
+                        country = ""
+                        if country_mapping and project_id in country_mapping:
+                            country = country_mapping[project_id]
+                            country = country.replace(" ", "_")  # Replace spaces with underscores
+                            logging.info(f"Found country '{country}' for project ID: {project_id}")
+                        else:
+                            logging.debug(f"No country mapping found for project ID: {project_id}")
+                        
+                        # Create new filename with project ID, country (if available), and language
+                        if country:
+                            pid_filename = f"{project_id}_{country}_{language_suffix}.pdf"
+                        else:
+                            pid_filename = f"{project_id}_{language_suffix}.pdf"
+                            
                         dest_file = os.path.join(target_dir, pid_filename)
                         
                         # Handle duplicate filenames
                         if os.path.exists(dest_file):
                             counter = 1
                             while True:
-                                temp_name = f"{project_id}_{language_suffix}_{counter:02d}.pdf"
+                                if country:
+                                    temp_name = f"{project_id}_{country}_{language_suffix}_{counter:02d}.pdf"
+                                else:
+                                    temp_name = f"{project_id}_{language_suffix}_{counter:02d}.pdf"
                                 temp_path = os.path.join(target_dir, temp_name)
                                 if not os.path.exists(temp_path):
                                     dest_file = temp_path
@@ -372,7 +397,7 @@ def copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=T
                                     break
                                 counter += 1
                         
-                        logging.info(f"Copying with project ID: {pdf_file} -> {dest_file}")
+                        logging.debug(f"Copying with project ID: {pdf_file} -> {dest_file}")
                         shutil.copy2(pdf_file, dest_file)
                         copied += 1
                         pid_mapping[dest_file] = project_id
@@ -383,7 +408,7 @@ def copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=T
                         if os.path.exists(dest_file):
                             unique_dest = get_unique_filename(dest_file)
                             shutil.copy2(pdf_file, unique_dest)
-                            logging.info(f"Created unique filename: {unique_dest}")
+                            logging.debug(f"Created unique filename: {unique_dest}")
                             copied += 1
                         else:
                             # No conflict, copy normally
@@ -397,7 +422,7 @@ def copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=T
                         # regardless of the overwrite parameter
                         unique_dest = get_unique_filename(dest_file)
                         shutil.copy2(pdf_file, unique_dest)
-                        logging.info(f"Created unique filename: {unique_dest}")
+                        logging.debug(f"Created unique filename: {unique_dest}")
                         copied += 1
                     else:
                         # No conflict, copy normally
@@ -405,7 +430,6 @@ def copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=T
                         copied += 1
             except Exception as e:
                 error_msg = f"Error copying {pdf_file}: {str(e)}"
-                print(error_msg)
                 logging.error(error_msg)
                 skipped += 1
             
@@ -444,6 +468,9 @@ def convert_folder_to_pdf(rename_with_pid=True, country_mapping=None):
             
             if os.path.exists(spreadsheet_path):
                 country_mapping = load_project_country_mapping(spreadsheet_path)
+                if not country_mapping:
+                    print("Warning: No valid project ID to country mappings found in the spreadsheet.")
+                    print("Files will be renamed with project IDs only.")
             else:
                 print(f"Warning: Spreadsheet file not found: {spreadsheet_path}")
                 country_mapping = {}
@@ -462,6 +489,8 @@ def convert_folder_to_pdf(rename_with_pid=True, country_mapping=None):
     word_files = []
     # Find all .pdf files
     pdf_files = []
+    
+    print("\nScanning input directory for documents...")
     for root, _, files in os.walk(input_dir):
         for file in files:
             lower_file = file.lower()
@@ -474,12 +503,12 @@ def convert_folder_to_pdf(rename_with_pid=True, country_mapping=None):
     project_id_mappings = {}
     
     if not word_files:
-        print(f"No Word documents (.doc or .docx) found in {input_dir}")
+        print("No Word documents (.doc or .docx) found in the input directory")
         # Even if no Word files are found, we'll still copy PDFs
     else:
         # Get maximum number of workers for optimal performance
         # Use all available CPU cores
-        max_workers = os.cpu_count()
+        max_workers = min(os.cpu_count(), 4)  # Limit to 4 processes to avoid overwhelming Word
         
         print(f"Found {len(word_files)} Word documents to convert")
         print(f"Using Microsoft Word for conversion with {max_workers} worker processes")
@@ -507,8 +536,8 @@ def convert_folder_to_pdf(rename_with_pid=True, country_mapping=None):
             # Clean up any existing Word processes before each batch
             try:
                 subprocess.run(["taskkill", "/f", "/im", "WINWORD.EXE"], 
-                              stdout=subprocess.DEVNULL, 
-                              stderr=subprocess.DEVNULL)
+                             stdout=subprocess.DEVNULL, 
+                             stderr=subprocess.DEVNULL)
                 time.sleep(1)  # Give system time to close Word
             except:
                 pass
@@ -522,7 +551,7 @@ def convert_folder_to_pdf(rename_with_pid=True, country_mapping=None):
                 }
                 
                 # Process results
-                with tqdm(total=len(batch), unit="file") as pbar:
+                with tqdm(total=len(batch), unit="file", desc="Converting", ncols=100, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as pbar:
                     for future in concurrent.futures.as_completed(future_to_file):
                         file_path, success, error, project_id = future.result()
                         if success:
@@ -531,14 +560,14 @@ def convert_folder_to_pdf(rename_with_pid=True, country_mapping=None):
                                 project_id_mappings[file_path] = project_id
                         else:
                             failed += 1
-                            print(f"Error converting {file_path}: {error}")
+                            logging.error(f"Error converting {file_path}: {error}")
                         pbar.update(1)
         
         # Report results
         elapsed_time = time.time() - start_time
         files_per_second = len(word_files) / elapsed_time if elapsed_time > 0 else 0
         
-        print(f"\nConversion complete in {elapsed_time:.2f} seconds ({files_per_second:.2f} files/sec)")
+        print(f"\nWord conversion complete in {elapsed_time:.2f} seconds ({files_per_second:.2f} files/sec)")
         print(f"Successfully converted: {successful}")
         print(f"Failed conversions: {failed}")
         
@@ -549,7 +578,7 @@ def convert_folder_to_pdf(rename_with_pid=True, country_mapping=None):
             print("Success rate: N/A (no files processed)")
     
     # Always set overwrite=False to ensure no files are overwritten
-    copied_pdfs, pdf_pid_mappings = copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=rename_with_pid)
+    copied_pdfs, pdf_pid_mappings = copy_existing_pdfs(input_dir, output_dir, overwrite=False, rename_with_pid=rename_with_pid, country_mapping=country_mapping)
     
     # Merge the project ID mappings
     project_id_mappings.update(pdf_pid_mappings)
@@ -733,6 +762,9 @@ def load_project_country_mapping(spreadsheet_path, pid_column=None, country_colu
             logging.error(f"Unsupported file format: {file_ext}")
             return {}
         
+        # Convert all column names to strings to avoid any type issues
+        df.columns = [str(col) for col in df.columns]
+        
         # Show the column names to the user if not specified
         if pid_column is None or country_column is None:
             print("\nAvailable columns in the spreadsheet:")
@@ -746,7 +778,9 @@ def load_project_country_mapping(spreadsheet_path, pid_column=None, country_colu
                     pid_column = int(pid_column)
                     pid_column = df.columns[pid_column]
                 except ValueError:
+                    # If not an integer, use as column name
                     pass
+                print(f"Using column '{pid_column}' for Project IDs")
             
             if country_column is None:
                 country_column = input("Enter the number or name of the column containing Countries: ").strip()
@@ -755,25 +789,30 @@ def load_project_country_mapping(spreadsheet_path, pid_column=None, country_colu
                     country_column = int(country_column)
                     country_column = df.columns[country_column]
                 except ValueError:
+                    # If not an integer, use as column name
                     pass
+                print(f"Using column '{country_column}' for Countries")
         
         # Ensure the columns exist
         if pid_column not in df.columns:
             logging.error(f"Project ID column '{pid_column}' not found in spreadsheet")
+            print(f"Error: Project ID column '{pid_column}' not found in spreadsheet")
             return {}
         
         if country_column not in df.columns:
             logging.error(f"Country column '{country_column}' not found in spreadsheet")
+            print(f"Error: Country column '{country_column}' not found in spreadsheet")
             return {}
         
         # Create the mapping
         mapping = {}
         for _, row in df.iterrows():
+            # Convert to string and strip whitespace to ensure consistency
             project_id = str(row[pid_column]).strip()
             country = str(row[country_column]).strip()
             
             # Skip empty values
-            if not project_id or not country:
+            if not project_id or not country or project_id.lower() == 'nan' or country.lower() == 'nan':
                 continue
             
             # Handle project IDs that may not start with 'P'
@@ -789,6 +828,15 @@ def load_project_country_mapping(spreadsheet_path, pid_column=None, country_colu
                 mapping[project_id] = country
         
         print(f"Loaded {len(mapping)} project ID to country mappings")
+        
+        # Show a sample of the mappings
+        if mapping:
+            sample_size = min(5, len(mapping))
+            print("Sample mappings:")
+            sample_items = list(mapping.items())[:sample_size]
+            for pid, country in sample_items:
+                print(f"  {pid} -> {country}")
+        
         return mapping
     
     except Exception as e:
